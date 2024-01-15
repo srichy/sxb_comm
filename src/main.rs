@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read, Write, Error, ErrorKind, Result};
 
 #[derive(Parser, Debug)]
@@ -59,10 +59,11 @@ fn parse_address_expr(addr_exp: &str) -> (usize, usize) {
     let count: usize;
 
     if addr_exp.contains("-") {
-        // Do base + length
+        // Do beginning to end
         let parts: Vec<&str> = addr_exp.split('-').collect();
         start = usize::from_str_radix(parts[0], 16).expect("Bad format for starting hex address.");
-        count = parts[1].parse::<usize>().expect("Bad format for ending hex address.") - start + 1;
+        count = usize::from_str_radix(parts[1], 16).expect("Bad format for ending hex address.")
+            - start + 1;
         return (start, count);
     } else if addr_exp.contains(",") {
         // Do base + length
@@ -73,6 +74,21 @@ fn parse_address_expr(addr_exp: &str) -> (usize, usize) {
     } else {
         start = addr_exp.parse::<usize>().expect("Bad format for address.");
         return (start, 1);
+    }
+}
+
+fn parse_filename_and_address(addr_exp: &str) -> Result<(String, usize)> {
+    let filename: String;
+    let start: usize;
+
+    if addr_exp.contains("@") {
+        // Do beginning to end
+        let parts: Vec<&str> = addr_exp.split('@').collect();
+        filename = String::from(parts[0]);
+        start = usize::from_str_radix(parts[1], 16).expect("Bad format for starting hex address.");
+        return Ok((filename, start));
+    } else {
+        return Err(Error::new(ErrorKind::Other, "File upload requires format \"filename@baseaddr\""));
     }
 }
 
@@ -134,6 +150,54 @@ fn hex_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> 
     Ok(())
 }
 
+fn bin_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> Result<()> {
+    start_cmd(wdc_device, 3)?;
+    send_addr(wdc_device, start_addr)?;
+    send_count(wdc_device, block_size)?;
+
+    let mut stdout = io::stdout().lock();
+
+    // This following is bonkers.  But I'm not reducing the baud rate, and larger
+    // blocks can easily overrun the VIA-based USB serial interface on the WDC board.
+    // So I reduced this to a 1-byte buffer (same in the hex-dump) so I can easily
+    // open it backup laster to a longer buffer if I deal with setting a slower baud.
+    let mut buf = [0; 1];
+    while block_size > 0 {
+        let n_read = wdc_device.read(&mut buf)?;
+        block_size -= n_read;
+        stdout.write(&buf)?;
+    }
+
+    Ok(())
+}
+
+fn bin_upload(wdc_device: &mut File, filename: String, start_addr: usize) -> Result<()> {
+    let file_metadata = fs::metadata(&filename)?;
+    let file_length = file_metadata.len() as usize;
+
+    if file_length == 0 {
+        println!("*** Warning: filename {filename} is zero bytes long.");
+        return Ok(());
+    }
+
+    let mut in_file = File::open(&filename)?;
+
+    start_cmd(wdc_device, 2)?;
+    send_addr(wdc_device, start_addr)?;
+    send_count(wdc_device, file_length)?;
+
+    let mut buf = [0; 1];
+
+    loop {
+        let n_read = in_file.read(&mut buf)?;
+        if n_read == 0 {
+            break;
+        }
+        wdc_device.write(&buf)?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Args::parse();
 
@@ -158,31 +222,37 @@ fn main() -> Result<()> {
         }
 
         Action::ReadBinary => {
+            let start_addr: usize;
+            let block_size: usize;
+
             match cli.argument {
                 None => {
-                    io::stderr().write_all(b"*** Binary file name required.\n")?;
+                    io::stderr().write_all(b"*** Address or Address range required.\n")?;
                     return Ok(());
                 }
                 Some(arg) => {
-                    println!("@@@ Good job.  You specified {arg}.")
+                    (start_addr, block_size) = parse_address_expr(&arg);
                 }
             }
             let mut wdc_device = File::options().read(true).write(true).open(cli.device)?;
-            start_cmd(&mut wdc_device, 3)?;
+            bin_dump(&mut wdc_device, start_addr, block_size)?;
         }
 
         Action::WriteBinary => {
+            let in_filename: String;
+            let start_addr: usize;
+
             match cli.argument {
                 None => {
-                    io::stderr().write_all(b"*** Binary file name required.\n")?;
+                    io::stderr().write_all(b"*** filename@hexloc required.\n")?;
                     return Ok(());
                 }
                 Some(arg) => {
-                    println!("@@@ Good job.  You specified {arg}.")
+                    (in_filename, start_addr) = parse_filename_and_address(&arg)?;
                 }
             }
             let mut wdc_device = File::options().read(true).write(true).open(cli.device)?;
-            start_cmd(&mut wdc_device, 2)?;
+            bin_upload(&mut wdc_device, in_filename, start_addr)?;
         }
 
         Action::Execute => {
