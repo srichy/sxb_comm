@@ -1,6 +1,9 @@
 use clap::{Parser, ValueEnum};
 use std::fs::{self, File};
 use std::io::{self, Read, Write, Error, ErrorKind, Result};
+use std::thread::sleep;
+use std::time::Duration;
+use nix::sys::termios::{tcgetattr, cfsetspeed};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about=None)]
@@ -20,18 +23,28 @@ enum Action {
     HexDump,
     ReadBinary,
     WriteBinary,
-    Execute,
+    Execute6502,
+    Execute65816,
+}
+
+fn open_dev(dev_path: &str) -> Result<File> {
+    let wdc_device = File::options().read(true).write(true).open(dev_path)?;
+    let mut termios = tcgetattr(&wdc_device)?;
+    cfsetspeed(&mut termios, 9600u32)?;
+    Ok(wdc_device)
 }
 
 fn start_cmd(wdc_dev: &mut File, cmd: u8) -> Result<()> {
     let mut buf: [u8; 2] = [0x55, 0xaa];
     wdc_dev.write_all(&buf)?;
+    sleep(Duration::from_millis(5));
     wdc_dev.read_exact(&mut buf[0..1])?;
     if buf[0] != 0xcc {
         return Err(Error::new(ErrorKind::Other, "Unexpected status from WDC device"));
     }
     buf[0] = cmd;
     wdc_dev.write_all(&buf[0..1])?;
+    sleep(Duration::from_millis(5));
     Ok(())
 }
 
@@ -42,6 +55,7 @@ fn send_addr(wdc_dev: &mut File, start_addr: usize) -> Result<()> {
         ((start_addr >> 16) & 0xff) as u8,
     ];
     wdc_dev.write_all(&buf)?;
+    sleep(Duration::from_millis(5));
     Ok(())
 }
 
@@ -51,6 +65,7 @@ fn send_count(wdc_dev: &mut File, block_size: usize) -> Result<()> {
         ((block_size >> 8) & 0xff) as u8,
     ];
     wdc_dev.write_all(&buf)?;
+    sleep(Duration::from_millis(5));
     Ok(())
 }
 
@@ -121,10 +136,10 @@ fn hex_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> 
         print!("{:02x}", buf[0]);
 
         if line_offset == 7 {
-            print!("-");
+            print!("  ");
         } else {
             if line_offset == 15 {
-                print!(" : {ascii_line}\n");
+                print!("  |{ascii_line}|\n");
             } else {
                 print!(" ");
             }
@@ -136,10 +151,10 @@ fn hex_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> 
         for i in (line_offset+1)..16 {
             print!("  ");
             if i == 7 {
-                print!("-");
+                print!("  ");
             } else {
                 if i == 15 {
-                    print!(" : {ascii_line}\n");
+                    print!("  |{ascii_line}|\n");
                 } else {
                     print!(" ");
                 }
@@ -179,6 +194,7 @@ fn bin_upload(wdc_device: &mut File, filename: String, start_addr: usize) -> Res
         println!("*** Warning: filename {filename} is zero bytes long.");
         return Ok(());
     }
+    println!("Sending {file_length} bytes to {start_addr:x} address...");
 
     let mut in_file = File::open(&filename)?;
 
@@ -187,14 +203,52 @@ fn bin_upload(wdc_device: &mut File, filename: String, start_addr: usize) -> Res
     send_count(wdc_device, file_length)?;
 
     let mut buf = [0; 1];
-
+    let mut byte_count = 0;
     loop {
         let n_read = in_file.read(&mut buf)?;
         if n_read == 0 {
             break;
         }
-        wdc_device.write(&buf)?;
+        wdc_device.write_all(&buf)?;
+        sleep(Duration::from_millis(5));
+        byte_count +=1 ;
     }
+
+    println!("Wrote {byte_count} bytes.");
+
+    Ok(())
+}
+
+fn send_execute(cli: &Args, cpu_mode: u8) -> Result<()> {
+    let entry_addr: usize;
+
+    match &cli.argument {
+        None => {
+            io::stderr().write_all(b"*** Entry point address required.\n")?;
+            return Ok(());
+        }
+        Some(arg) => {
+            entry_addr = usize::from_str_radix(arg, 16).expect("Entry address must be hex.");
+        }
+    }
+
+    let mut buf = [0; 16];
+    buf[6] = (entry_addr & 0xff) as u8;
+    buf[7] = ((entry_addr >> 8) & 0xff) as u8;
+    buf[10] = 255;              // stack pointer
+    buf[13] = cpu_mode;
+
+    let mut wdc_dev = open_dev(&cli.device)?;
+    start_cmd(&mut wdc_dev, 2)?;
+    send_addr(&mut wdc_dev, 0x007e00)?;
+    send_count(&mut wdc_dev, buf.len())?;
+
+    for i in 0..buf.len() {
+        wdc_dev.write_all(&buf[i..i+1])?;
+        sleep(Duration::from_millis(5));
+    }
+    start_cmd(&mut wdc_dev, 5)?;
+
     Ok(())
 }
 
@@ -217,7 +271,7 @@ fn main() -> Result<()> {
                 }
             }
 
-            let mut wdc_device = File::options().read(true).write(true).open(cli.device)?;
+            let mut wdc_device = open_dev(&cli.device)?;
             hex_dump(&mut wdc_device, start_addr, block_size)?;
         }
 
@@ -234,7 +288,7 @@ fn main() -> Result<()> {
                     (start_addr, block_size) = parse_address_expr(&arg);
                 }
             }
-            let mut wdc_device = File::options().read(true).write(true).open(cli.device)?;
+            let mut wdc_device = open_dev(&cli.device)?;
             bin_dump(&mut wdc_device, start_addr, block_size)?;
         }
 
@@ -251,11 +305,18 @@ fn main() -> Result<()> {
                     (in_filename, start_addr) = parse_filename_and_address(&arg)?;
                 }
             }
-            let mut wdc_device = File::options().read(true).write(true).open(cli.device)?;
+            let mut wdc_device = open_dev(&cli.device)?;
             bin_upload(&mut wdc_device, in_filename, start_addr)?;
         }
 
-        Action::Execute => {
+        Action::Execute6502 => {
+            // Store resume context to 0x7e00, then call command/function 5 (or 6?)
+            send_execute(&cli, 1)?;
+        }
+
+        Action::Execute65816 => {
+            // Store resume context to 0x7e00, then call command/function 5 (or 6?)
+            send_execute(&cli, 0)?;
         }
     }
     Ok(())
