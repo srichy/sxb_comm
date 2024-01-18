@@ -232,6 +232,24 @@ fn send_execute(cli: &Args, cpu_mode: u8) -> Result<()> {
         }
     }
 
+    // Exec record offsets from 0x7e00, little-endian, all encoded as 16-bit
+    // values even if targeting 6502 mode.  Note that I am currently not
+    // handling any of these other than processor mode and entry address and
+    // am otherwise setting everything up as a typical 6502 execution environment
+    // (same as a power-on reset of a 65816, or 65c02).  I may want to think about
+    // setting the interrupt disable flag in the processor status register...
+    // ---------------------------------------------------------------------
+    // 0,1: A, B (C)
+    // 2,3: X
+    // 4,5: Y
+    // 6,7: START/entry address
+    // 8,9: direct page base address
+    // a,b: stack pointer base address
+    // c  : processor status register
+    // d  : proc mode: 0 -> 65816, 1 -> 6502
+    // e  : program bank register
+    // f  : data bank register
+
     let mut buf = [0; 16];
     buf[6] = (entry_addr & 0xff) as u8;
     buf[7] = ((entry_addr >> 8) & 0xff) as u8;
