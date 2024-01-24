@@ -30,13 +30,15 @@ enum Action {
 fn open_dev(dev_path: &str) -> Result<File> {
     let wdc_device = File::options().read(true).write(true).open(dev_path)?;
     let mut termios = tcgetattr(&wdc_device)?;
-    cfsetspeed(&mut termios, 9600u32)?;
+    cfsetspeed(&mut termios, 57600u32)?;
     Ok(wdc_device)
 }
 
 fn start_cmd(wdc_dev: &mut File, cmd: u8) -> Result<()> {
     let mut buf: [u8; 2] = [0x55, 0xaa];
-    wdc_dev.write_all(&buf)?;
+    wdc_dev.write_all(&buf[0..1])?;
+    sleep(Duration::from_millis(5));
+    wdc_dev.write_all(&buf[1..2])?;
     sleep(Duration::from_millis(5));
     wdc_dev.read_exact(&mut buf[0..1])?;
     if buf[0] != 0xcc {
@@ -253,7 +255,8 @@ fn send_execute(cli: &Args, cpu_mode: u8) -> Result<()> {
     let mut buf = [0; 16];
     buf[6] = (entry_addr & 0xff) as u8;
     buf[7] = ((entry_addr >> 8) & 0xff) as u8;
-    buf[10] = 255;              // stack pointer
+    buf[10] = 255;              // stack pointer (lo)
+    buf[11] = 1;                // stack pointer (hi)
     buf[13] = cpu_mode;
 
     let mut wdc_dev = open_dev(&cli.device)?;
