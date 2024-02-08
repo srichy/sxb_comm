@@ -1,9 +1,9 @@
 use clap::{Parser, ValueEnum};
+use serialport::{TTYPort, FlowControl, DataBits, Parity, StopBits};
 use std::fs::{self, File};
 use std::io::{self, Read, Write, Error, ErrorKind, Result};
 use std::thread::sleep;
 use std::time::Duration;
-use nix::sys::termios::{tcgetattr, cfsetspeed};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about=None)]
@@ -27,22 +27,64 @@ enum Action {
     Execute65816,
 }
 
-fn open_dev(dev_path: &str) -> Result<File> {
-    let wdc_device = File::options().read(true).write(true).open(dev_path)?;
-    let mut termios = tcgetattr(&wdc_device)?;
-    cfsetspeed(&mut termios, 57600u32)?;
-    Ok(wdc_device)
+fn open_dev(dev_path: &str) -> Result<TTYPort> {
+    println!("Opening {dev_path}...");
+    let wdc_dev = serialport::new(dev_path, 57600)
+        .flow_control(FlowControl::Hardware)
+        .timeout(Duration::from_millis(100))
+        .data_bits(DataBits::Eight)
+        .stop_bits(StopBits::One)
+        .parity(Parity::None)
+        .open_native()?;
+    sleep(Duration::from_millis(50));
+    //sync(&mut wdc_dev)?;
+    //sync(&mut wdc_dev)?;
+    //sync(&mut wdc_dev)?;
+    Ok(wdc_dev)
 }
 
-fn start_cmd(wdc_dev: &mut File, cmd: u8) -> Result<()> {
+pub fn sync(wdc_dev: &mut TTYPort) -> Result<()> {
+    let mut retry_count: u8 = 0;
+    loop {
+        println!("Syncing ... {retry_count}");
+        let mut buf: [u8; 1] = [0];
+        let r = wdc_dev.write(&buf[0..1])?;
+        if r != 1 {
+            println!("@@@ Cannot write single byte.");
+            continue;
+        }
+        println!("Sync waiting for zero byte...");
+        let r = wdc_dev.read(&mut buf[0..1])?;
+        if r == 0 {
+            retry_count += 1;
+            if retry_count > 5 {
+                return Err(Error::new(ErrorKind::Other, "Cannot sync"));
+            }
+            println!("@@@ Sync read 0 bytes.  Retrying.");
+        }
+        if buf[0] != 0 {
+            let byte = buf[0];
+            println!("*** [sync] Bad response: {byte}");
+        } else {
+            println!("Sync good.");
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn start_cmd(wdc_dev: &mut TTYPort, cmd: u8) -> Result<()> {
     let mut buf: [u8; 2] = [0x55, 0xaa];
-    wdc_dev.write_all(&buf[0..1])?;
-    sleep(Duration::from_millis(5));
-    wdc_dev.write_all(&buf[1..2])?;
-    sleep(Duration::from_millis(5));
+    wdc_dev.write_all(&buf[0..2])?;
     wdc_dev.read_exact(&mut buf[0..1])?;
     if buf[0] != 0xcc {
-        return Err(Error::new(ErrorKind::Other, "Unexpected status from WDC device"));
+        let byte = buf[0];
+        //let err_str = format!("Unexpected status from WDC device: {byte}");
+        //return Err(Error::new(ErrorKind::Other, err_str));
+        loop {
+            println!("Byte: {byte}");
+            wdc_dev.read_exact(&mut buf[0..1])?;
+        }
     }
     buf[0] = cmd;
     wdc_dev.write_all(&buf[0..1])?;
@@ -50,7 +92,7 @@ fn start_cmd(wdc_dev: &mut File, cmd: u8) -> Result<()> {
     Ok(())
 }
 
-fn send_addr(wdc_dev: &mut File, start_addr: usize) -> Result<()> {
+fn send_addr(wdc_dev: &mut TTYPort, start_addr: usize) -> Result<()> {
     let buf: [u8; 3] = [
         (start_addr & 0xff) as u8,
         ((start_addr >> 8) & 0xff) as u8,
@@ -61,7 +103,7 @@ fn send_addr(wdc_dev: &mut File, start_addr: usize) -> Result<()> {
     Ok(())
 }
 
-fn send_count(wdc_dev: &mut File, block_size: usize) -> Result<()> {
+fn send_count(wdc_dev: &mut TTYPort, block_size: usize) -> Result<()> {
     let buf: [u8; 2] = [
         (block_size & 0xff) as u8,
         ((block_size >> 8) & 0xff) as u8,
@@ -109,17 +151,17 @@ fn parse_filename_and_address(addr_exp: &str) -> Result<(String, usize)> {
     }
 }
 
-fn hex_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> Result<()> {
-    start_cmd(wdc_device, 3)?;
-    send_addr(wdc_device, start_addr)?;
-    send_count(wdc_device, block_size)?;
+fn hex_dump(wdc_dev: &mut TTYPort, start_addr: usize, mut block_size: usize) -> Result<()> {
+    start_cmd(wdc_dev, 3)?;
+    send_addr(wdc_dev, start_addr)?;
+    send_count(wdc_dev, block_size)?;
 
     let mut buf = [0; 1];
     let mut offset: usize = 0;
     let mut line_offset: usize = 0;
     let mut ascii_line = String::new();
     while block_size > 0 {
-        let n_read = wdc_device.read(&mut buf)?;
+        let n_read = wdc_dev.read(&mut buf)?;
         block_size -= n_read;
 
         line_offset = offset % 16;
@@ -167,10 +209,10 @@ fn hex_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> 
     Ok(())
 }
 
-fn bin_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> Result<()> {
-    start_cmd(wdc_device, 3)?;
-    send_addr(wdc_device, start_addr)?;
-    send_count(wdc_device, block_size)?;
+fn bin_dump(wdc_dev: &mut TTYPort, start_addr: usize, mut block_size: usize) -> Result<()> {
+    start_cmd(wdc_dev, 3)?;
+    send_addr(wdc_dev, start_addr)?;
+    send_count(wdc_dev, block_size)?;
 
     let mut stdout = io::stdout().lock();
 
@@ -180,7 +222,7 @@ fn bin_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> 
     // open it backup laster to a longer buffer if I deal with setting a slower baud.
     let mut buf = [0; 1];
     while block_size > 0 {
-        let n_read = wdc_device.read(&mut buf)?;
+        let n_read = wdc_dev.read(&mut buf)?;
         block_size -= n_read;
         stdout.write(&buf)?;
     }
@@ -188,7 +230,7 @@ fn bin_dump(wdc_device: &mut File, start_addr: usize, mut block_size: usize) -> 
     Ok(())
 }
 
-fn bin_upload(wdc_device: &mut File, filename: String, start_addr: usize) -> Result<()> {
+fn bin_upload(wdc_dev: &mut TTYPort, filename: String, start_addr: usize) -> Result<()> {
     let file_metadata = fs::metadata(&filename)?;
     let file_length = file_metadata.len() as usize;
 
@@ -200,9 +242,9 @@ fn bin_upload(wdc_device: &mut File, filename: String, start_addr: usize) -> Res
 
     let mut in_file = File::open(&filename)?;
 
-    start_cmd(wdc_device, 2)?;
-    send_addr(wdc_device, start_addr)?;
-    send_count(wdc_device, file_length)?;
+    start_cmd(wdc_dev, 2)?;
+    send_addr(wdc_dev, start_addr)?;
+    send_count(wdc_dev, file_length)?;
 
     let mut buf = [0; 1];
     let mut byte_count = 0;
@@ -211,9 +253,12 @@ fn bin_upload(wdc_device: &mut File, filename: String, start_addr: usize) -> Res
         if n_read == 0 {
             break;
         }
-        wdc_device.write_all(&buf)?;
-        sleep(Duration::from_millis(5));
+        wdc_dev.write_all(&buf)?;
+        sleep(Duration::from_millis(1));
         byte_count +=1 ;
+        if byte_count % 100 == 0 {
+            println!("\r{byte_count}");
+        }
     }
 
     println!("Wrote {byte_count} bytes.");
@@ -292,8 +337,8 @@ fn main() -> Result<()> {
                 }
             }
 
-            let mut wdc_device = open_dev(&cli.device)?;
-            hex_dump(&mut wdc_device, start_addr, block_size)?;
+            let mut wdc_dev = open_dev(&cli.device)?;
+            hex_dump(&mut wdc_dev, start_addr, block_size)?;
         }
 
         Action::ReadBinary => {
@@ -309,8 +354,8 @@ fn main() -> Result<()> {
                     (start_addr, block_size) = parse_address_expr(&arg);
                 }
             }
-            let mut wdc_device = open_dev(&cli.device)?;
-            bin_dump(&mut wdc_device, start_addr, block_size)?;
+            let mut wdc_dev = open_dev(&cli.device)?;
+            bin_dump(&mut wdc_dev, start_addr, block_size)?;
         }
 
         Action::WriteBinary => {
@@ -326,8 +371,9 @@ fn main() -> Result<()> {
                     (in_filename, start_addr) = parse_filename_and_address(&arg)?;
                 }
             }
-            let mut wdc_device = open_dev(&cli.device)?;
-            bin_upload(&mut wdc_device, in_filename, start_addr)?;
+            let mut wdc_dev = open_dev(&cli.device)?;
+            sleep(Duration::from_millis(50));
+            bin_upload(&mut wdc_dev, in_filename, start_addr)?;
         }
 
         Action::Execute6502 => {
