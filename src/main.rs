@@ -25,6 +25,8 @@ enum Action {
     WriteBinary,
     Execute6502,
     Execute65816,
+    SExecute6502,
+    SExecute65816,
 }
 
 fn open_dev(dev_path: &str) -> Result<TTYPort> {
@@ -74,20 +76,20 @@ pub fn sync(wdc_dev: &mut TTYPort) -> Result<()> {
 }
 
 fn start_cmd(wdc_dev: &mut TTYPort, cmd: u8) -> Result<()> {
-    let mut buf: [u8; 2] = [0x55, 0xaa];
-    wdc_dev.write_all(&buf[0..2])?;
-    wdc_dev.read_exact(&mut buf[0..1])?;
-    if buf[0] != 0xcc {
-        let byte = buf[0];
-        //let err_str = format!("Unexpected status from WDC device: {byte}");
-        //return Err(Error::new(ErrorKind::Other, err_str));
-        loop {
+    loop {
+        let mut buf: [u8; 2] = [0x55, 0xaa];
+        wdc_dev.write_all(&buf[0..2])?;
+        wdc_dev.read_exact(&mut buf[0..1])?;
+        if buf[0] != 0xcc {
+            let byte = buf[0];
             println!("Byte: {byte}");
-            wdc_dev.read_exact(&mut buf[0..1])?;
+            sync(wdc_dev)?;
+            continue;
         }
+        buf[0] = cmd;
+        wdc_dev.write_all(&buf[0..1])?;
+        break;
     }
-    buf[0] = cmd;
-    wdc_dev.write_all(&buf[0..1])?;
     sleep(Duration::from_millis(5));
     Ok(())
 }
@@ -266,7 +268,7 @@ fn bin_upload(wdc_dev: &mut TTYPort, filename: String, start_addr: usize) -> Res
     Ok(())
 }
 
-fn send_execute(cli: &Args, cpu_mode: u8) -> Result<()> {
+fn send_execute(cli: &Args, cpu_mode: u8, do_serial: bool) -> Result<()> {
     let entry_addr: usize;
 
     match &cli.argument {
@@ -378,12 +380,21 @@ fn main() -> Result<()> {
 
         Action::Execute6502 => {
             // Store resume context to 0x7e00, then call command/function 5 (or 6?)
-            send_execute(&cli, 1)?;
+            send_execute(&cli, 1, false)?;
         }
 
         Action::Execute65816 => {
             // Store resume context to 0x7e00, then call command/function 5 (or 6?)
-            send_execute(&cli, 0)?;
+            send_execute(&cli, 0, false)?;
+        }
+        Action::SExecute6502 => {
+            // Store resume context to 0x7e00, then call command/function 5 (or 6?)
+            send_execute(&cli, 1, true)?;
+        }
+
+        Action::SExecute65816 => {
+            // Store resume context to 0x7e00, then call command/function 5 (or 6?)
+            send_execute(&cli, 0, true)?;
         }
     }
     Ok(())
