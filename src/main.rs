@@ -1,5 +1,6 @@
 use clap::{Parser, ValueEnum};
 use serialport::{TTYPort, FlowControl, DataBits, Parity, StopBits};
+use indicatif::ProgressBar;
 use std::fs::{self, File};
 use std::io::{self, Read, Write, Error, ErrorKind, Result};
 use std::thread::sleep;
@@ -248,6 +249,8 @@ fn bin_upload(wdc_dev: &mut TTYPort, filename: String, start_addr: usize) -> Res
     send_addr(wdc_dev, start_addr)?;
     send_count(wdc_dev, file_length)?;
 
+    let progress_bar = ProgressBar::new(file_length as u64);
+
     let mut buf = [0; 1];
     let mut byte_count = 0;
     loop {
@@ -258,10 +261,9 @@ fn bin_upload(wdc_dev: &mut TTYPort, filename: String, start_addr: usize) -> Res
         wdc_dev.write_all(&buf)?;
         sleep(Duration::from_millis(1));
         byte_count +=1 ;
-        if byte_count % 100 == 0 {
-            println!("\r{byte_count}");
-        }
+        progress_bar.inc(1);
     }
+    progress_bar.finish();
 
     println!("Wrote {byte_count} bytes.");
 
